@@ -3,7 +3,7 @@ var cors = require("cors");
 require("dotenv").config();
 const app = express();
 const port = process.env.PORT || 3000;
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 app.use(cors());
 app.use(express.json());
@@ -26,11 +26,32 @@ async function run() {
     const db = client.db("eTuitionBD_db");
     const tuitionCollection = db.collection("tuitions");
 
-    app.get("/tuitions", async (req, res) => {});
+    app.get("/tuitions", async (req, res) => {
+      const query = {};
+      const { email } = req.query;
+
+      if (email) {
+        query.email = email;
+      }
+
+      const options = { sort: { createdAt: -1 } };
+
+      const cursor = tuitionCollection.find(query, options);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
 
     app.post("/tuitions", async (req, res) => {
       const tuition = req.body;
       const result = await tuitionCollection.insertOne(tuition);
+      res.send(result);
+    });
+
+    app.delete("/tuitions/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+
+      const result = await tuitionCollection.deleteOne(query);
       res.send(result);
     });
 
