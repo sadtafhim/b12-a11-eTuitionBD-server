@@ -9,6 +9,8 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Initialize Firebase Admin
+// WARNING: Ensure all environment variables (especially PRIVATE_KEY) are correctly configured.
+// Incorrect configuration here is the primary reason for 401/logout issues.
 admin.initializeApp({
   credential: admin.credential.cert({
     type: process.env.FIREBASE_TYPE,
@@ -28,17 +30,23 @@ app.use(express.json());
 
 // Firebase Token Verification Middleware
 const verifyFBToken = async (req, res, next) => {
-  const token = req.headers.authorization;
-  if (!token) return res.status(401).send({ message: "Unauthorized access" });
+  const authorizationHeader = req.headers.authorization;
+  if (!authorizationHeader || !authorizationHeader.startsWith("Bearer ")) {
+    return res
+      .status(401)
+      .send({ message: "Unauthorized access: No token provided" });
+  }
 
   try {
-    const idToken = token.split(" ")[1];
+    const idToken = authorizationHeader.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
     req.decoded_email = decoded.email;
     next();
   } catch (err) {
-    console.error("Firebase token verification failed:", err);
-    return res.status(401).send({ message: "Unauthorized access" });
+    console.error("Firebase token verification failed:", err); // Sending a 401 here triggers the logOut() function on the frontend
+    return res
+      .status(401)
+      .send({ message: "Unauthorized access: Invalid token" });
   }
 };
 
@@ -59,9 +67,8 @@ async function run() {
 
     const db = client.db("eTuitionBD_db");
     const tuitionCollection = db.collection("tuitions");
-    const userCollection = db.collection("users");
+    const userCollection = db.collection("users"); // ===== User Routes =====
 
-    // ===== User Routes =====
     app.post("/users", async (req, res) => {
       try {
         const user = req.body;
@@ -82,9 +89,46 @@ async function run() {
       }
     });
 
-    // ===== Tuition Routes =====
+    app.get("/users", verifyFBToken, async (req, res) => {
+      try {
+        const { email } = req.query;
+        const query = email ? { email } : {};
 
-    // Get all tuitions or by user email
+        if (email && email !== req.decoded_email) {
+          return res
+            .status(403)
+            .send({ message: "Forbidden access: Email mismatch" });
+        }
+
+        const users = await userCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        if (email) {
+          res.send(users[0] || {});
+        } else {
+          res.send(users);
+        }
+      } catch (err) {
+        console.error("Error fetching user(s):", err);
+        res.status(500).send({ message: "Failed to fetch user(s)" });
+      }
+    });
+
+    app.get("/users/:id", verifyFBToken, async (req, res) => {
+      try {
+        const user = await userCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!user) return res.status(404).send({ message: "User not found" });
+        res.send(user);
+      } catch (err) {
+        console.error("Error fetching user:", err);
+        res.status(400).send({ message: "Invalid user ID" });
+      }
+    }); // ===== Tuition Routes =====
+
     app.get("/tuitions", verifyFBToken, async (req, res) => {
       try {
         const { email } = req.query;
@@ -105,8 +149,7 @@ async function run() {
       }
     });
 
-    // Get single tuition by ID
-    app.get("/tuitions/:id", async (req, res) => {
+    app.get("/tuitions/:id", verifyFBToken, async (req, res) => {
       try {
         const tuition = await tuitionCollection.findOne({
           _id: new ObjectId(req.params.id),
@@ -120,8 +163,7 @@ async function run() {
       }
     });
 
-    // Create new tuition
-    app.post("/tuitions", async (req, res) => {
+    app.post("/tuitions", verifyFBToken, async (req, res) => {
       try {
         const tuition = req.body;
         tuition.createdAt = new Date();
@@ -134,8 +176,7 @@ async function run() {
       }
     });
 
-    // Update tuition
-    app.patch("/tuitions/:id", async (req, res) => {
+    app.patch("/tuitions/:id", verifyFBToken, async (req, res) => {
       try {
         const updatedDoc = req.body;
         const result = await tuitionCollection.updateOne(
@@ -155,8 +196,7 @@ async function run() {
       }
     });
 
-    // Delete tuition
-    app.delete("/tuitions/:id", async (req, res) => {
+    app.delete("/tuitions/:id", verifyFBToken, async (req, res) => {
       try {
         const result = await tuitionCollection.deleteOne({
           _id: new ObjectId(req.params.id),
