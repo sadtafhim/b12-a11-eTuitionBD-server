@@ -47,12 +47,56 @@ async function run() {
       res.send(result);
     });
 
+    app.get("/tuitions/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await tuitionCollection.findOne(query);
+        res.send(result);
+      } catch (error) {
+        console.error("Error fetching single tuition:", error);
+        res.status(404).send({ message: "Tuition not found or invalid ID." });
+      }
+    });
     app.delete("/tuitions/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
 
       const result = await tuitionCollection.deleteOne(query);
       res.send(result);
+    });
+
+    app.patch("/tuitions/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updatedDoc = req.body;
+
+        const query = { _id: new ObjectId(id) };
+
+        // Only include updatable fields and metadata.
+        // **FIX: Removed _id: undefined**
+        const updateOperation = {
+          $set: {
+            ...updatedDoc,
+            status: "pending",
+            updatedAt: new Date().toISOString(),
+          },
+        };
+
+        const result = await tuitionCollection.updateOne(
+          query,
+          updateOperation,
+          { upsert: false }
+        );
+
+        res.send(result);
+      } catch (error) {
+        // Catches the error to prevent the server from crashing
+        console.error("Error updating tuition:", error);
+        res
+          .status(500)
+          .send({ message: "Failed to update tuition due to a server error." });
+      }
     });
 
     // Send a ping to confirm a successful connection
