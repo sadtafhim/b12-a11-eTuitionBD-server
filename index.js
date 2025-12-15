@@ -1,48 +1,49 @@
+// backend/server.js
 const express = require("express");
-var cors = require("cors");
+const cors = require("cors");
 require("dotenv").config();
-const app = express();
-const port = process.env.PORT || 3000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-
 const admin = require("firebase-admin");
 
-const serviceAccount = require("./e-tuition-bd-firebase-adminsdk.json");
+const app = express();
+const port = process.env.PORT || 3000;
 
+// Initialize Firebase Admin
 admin.initializeApp({
   credential: admin.credential.cert({
     type: process.env.FIREBASE_TYPE,
     project_id: process.env.FIREBASE_PROJECT_ID,
-    private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n").replace(
+      /^"|"$/g,
+      ""
+    ),
     client_email: process.env.FIREBASE_CLIENT_EMAIL,
     client_id: process.env.FIREBASE_CLIENT_ID,
   }),
 });
 
+// Middleware
 app.use(cors());
 app.use(express.json());
 
+// Firebase Token Verification Middleware
 const verifyFBToken = async (req, res, next) => {
   const token = req.headers.authorization;
-
-  if (!token) {
-    return res.status(401).send({ message: "unauthorized access" });
-  }
+  if (!token) return res.status(401).send({ message: "Unauthorized access" });
 
   try {
     const idToken = token.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-    console.log("decoded in the token", decoded);
     req.decoded_email = decoded.email;
+    next();
   } catch (err) {
-    return res.status(401).send({ message: "unauthorized access" });
+    console.error("Firebase token verification failed:", err);
+    return res.status(401).send({ message: "Unauthorized access" });
   }
-  next();
 };
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.h1ahmwn.mongodb.net/?appName=Cluster0`;
-
+// MongoDB Connection
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.h1ahmwn.mongodb.net/eTuitionBD_db?retryWrites=true&w=majority`;
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -53,107 +54,130 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
+    console.log("Connected to MongoDB!");
 
     const db = client.db("eTuitionBD_db");
     const tuitionCollection = db.collection("tuitions");
+    const userCollection = db.collection("users");
 
-    app.get("/tuitions", verifyFBToken, async (req, res) => {
-      const query = {};
-      const { email } = req.query;
-
-      if (email) {
-        query.email = email;
-
-        if (email !== req.decoded_email) {
-          return res.status(403).send({ message: "forbidden access" });
+    // ===== User Routes =====
+    app.post("/users", async (req, res) => {
+      try {
+        const user = req.body;
+        user.role = user.role || "student";
+        user.createdAt = new Date();
+        const email = user.email;
+        const userExists = await userCollection.findOne({ email });
+        if (userExists) {
+          return res.send({ message: "user exists" });
         }
+
+        const result = await userCollection.insertOne(user);
+        console.log("User registered:", user.email);
+        res.send({ insertedId: result.insertedId });
+      } catch (err) {
+        console.error("Error creating user:", err);
+        res.status(500).send({ message: "Failed to create user" });
       }
-
-      const options = { sort: { createdAt: -1 } };
-
-      const cursor = tuitionCollection.find(query, options);
-      const result = await cursor.toArray();
-      res.send(result);
-
-      console.log("headers", req.headers);
     });
 
-    app.post("/tuitions", async (req, res) => {
-      const tuition = req.body;
-      const result = await tuitionCollection.insertOne(tuition);
-      res.send(result);
+    // ===== Tuition Routes =====
+
+    // Get all tuitions or by user email
+    app.get("/tuitions", verifyFBToken, async (req, res) => {
+      try {
+        const { email } = req.query;
+        const query = email ? { email } : {};
+
+        if (email && email !== req.decoded_email) {
+          return res.status(403).send({ message: "Forbidden access" });
+        }
+
+        const tuitions = await tuitionCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(tuitions);
+      } catch (err) {
+        console.error("Error fetching tuitions:", err);
+        res.status(500).send({ message: "Failed to fetch tuitions" });
+      }
     });
 
+    // Get single tuition by ID
     app.get("/tuitions/:id", async (req, res) => {
       try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await tuitionCollection.findOne(query);
-        res.send(result);
-      } catch (error) {
-        console.error("Error fetching single tuition:", error);
-        res.status(404).send({ message: "Tuition not found or invalid ID." });
+        const tuition = await tuitionCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!tuition)
+          return res.status(404).send({ message: "Tuition not found" });
+        res.send(tuition);
+      } catch (err) {
+        console.error("Error fetching tuition:", err);
+        res.status(400).send({ message: "Invalid tuition ID" });
       }
     });
-    app.delete("/tuitions/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
 
-      const result = await tuitionCollection.deleteOne(query);
-      res.send(result);
+    // Create new tuition
+    app.post("/tuitions", async (req, res) => {
+      try {
+        const tuition = req.body;
+        tuition.createdAt = new Date();
+
+        const result = await tuitionCollection.insertOne(tuition);
+        res.send({ insertedId: result.insertedId });
+      } catch (err) {
+        console.error("Error creating tuition:", err);
+        res.status(500).send({ message: "Failed to create tuition" });
+      }
     });
 
+    // Update tuition
     app.patch("/tuitions/:id", async (req, res) => {
       try {
-        const id = req.params.id;
         const updatedDoc = req.body;
-
-        const query = { _id: new ObjectId(id) };
-
-        // Only include updatable fields and metadata.
-        // **FIX: Removed _id: undefined**
-        const updateOperation = {
-          $set: {
-            ...updatedDoc,
-            status: "pending",
-            updatedAt: new Date().toISOString(),
-          },
-        };
-
         const result = await tuitionCollection.updateOne(
-          query,
-          updateOperation,
-          { upsert: false }
+          { _id: new ObjectId(req.params.id) },
+          {
+            $set: {
+              ...updatedDoc,
+              status: "pending",
+              updatedAt: new Date().toISOString(),
+            },
+          }
         );
-
         res.send(result);
-      } catch (error) {
-        // Catches the error to prevent the server from crashing
-        console.error("Error updating tuition:", error);
-        res
-          .status(500)
-          .send({ message: "Failed to update tuition due to a server error." });
+      } catch (err) {
+        console.error("Error updating tuition:", err);
+        res.status(500).send({ message: "Failed to update tuition" });
       }
     });
 
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
+    // Delete tuition
+    app.delete("/tuitions/:id", async (req, res) => {
+      try {
+        const result = await tuitionCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send(result);
+      } catch (err) {
+        console.error("Error deleting tuition:", err);
+        res.status(500).send({ message: "Failed to delete tuition" });
+      }
+    });
+  } catch (err) {
+    console.error("MongoDB connection failed:", err);
   }
 }
-run().catch(console.dir);
 
+run().catch(console.error);
+
+// Health check route
 app.get("/", (req, res) => {
-  res.send("eTutionBD Server is Running!");
+  res.send("eTuitionBD Server is Running!");
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+// Start server
+app.listen(port, () => console.log(`Server running on port ${port}`));
