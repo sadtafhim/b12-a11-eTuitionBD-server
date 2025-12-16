@@ -127,7 +127,11 @@ async function run() {
         console.error("Error fetching user:", err);
         res.status(400).send({ message: "Invalid user ID" });
       }
-    }); // ===== Tuition Routes =====
+    }); 
+    
+    
+    
+    // ===== Tuition Routes =====
 
     app.get("/tuitions", verifyFBToken, async (req, res) => {
       try {
