@@ -178,6 +178,72 @@ async function run() {
         res.status(500).send({ message: "Failed to update user information" });
       }
     });
+    app.delete("/users/:id", verifyFBToken, async (req, res) => {
+      try {
+        const userId = req.params.id;
+        const requesterEmail = req.decoded_email;
+
+        // 1. Authorization Check: Ensure requester is an 'admin'
+        const requester = await userCollection.findOne({
+          email: requesterEmail,
+        });
+
+        if (requester?.role !== "admin") {
+          return res
+            .status(403)
+            .send({ message: "Forbidden access: Requires Admin role" });
+        }
+
+        // 2. Find the user in MongoDB to get their email
+        const userToDelete = await userCollection.findOne({
+          _id: new ObjectId(userId),
+        });
+
+        if (!userToDelete) {
+          return res
+            .status(404)
+            .send({ message: "User not found in database" });
+        }
+
+        // 3. CRITICAL STEP: Delete the user from Firebase Authentication
+        try {
+          const firebaseUser = await admin
+            .auth()
+            .getUserByEmail(userToDelete.email);
+          await admin.auth().deleteUser(firebaseUser.uid);
+          console.log(
+            `Successfully deleted user from Firebase: ${userToDelete.email}`
+          );
+        } catch (firebaseErr) {
+          // Log the error but continue if it's a "user not found" error,
+          // as this could mean the Firebase account was already deleted.
+          if (firebaseErr.code !== "auth/user-not-found") {
+            console.error("Error deleting user from Firebase:", firebaseErr);
+            // You might choose to stop here if a Firebase error occurs
+            // return res.status(500).send({ message: "Failed to delete Firebase account" });
+          }
+        }
+
+        // 4. Delete the user from MongoDB
+        const result = await userCollection.deleteOne({
+          _id: new ObjectId(userId),
+        });
+
+        if (result.deletedCount === 0) {
+          return res
+            .status(500)
+            .send({ message: "Database deletion failed after Firebase step" });
+        }
+
+        res.send(result);
+      } catch (err) {
+        console.error("Error deleting user:", err);
+        if (err.name === "BSONTypeError") {
+          return res.status(400).send({ message: "Invalid user ID format" });
+        }
+        res.status(500).send({ message: "Failed to process user deletion" });
+      }
+    });
 
     // ===== Tuition Routes =====
 
