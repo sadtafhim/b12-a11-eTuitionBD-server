@@ -127,10 +127,58 @@ async function run() {
         console.error("Error fetching user:", err);
         res.status(400).send({ message: "Invalid user ID" });
       }
-    }); 
-    
-    
-    
+    });
+
+    app.patch("/users/:id", verifyFBToken, async (req, res) => {
+      try {
+        const userId = req.params.id;
+        const updatedDoc = req.body;
+
+        // --- Authorization Check ---
+        // 1. Get the authenticated user from the token
+        const requesterEmail = req.decoded_email;
+
+        // 2. Fetch the requester's role (Ideally, you would have a separate middleware for this)
+        const requester = await userCollection.findOne({
+          email: requesterEmail,
+        });
+
+        // 3. Deny access if the requester is not an 'admin'
+        if (requester?.role !== "admin") {
+          return res
+            .status(403)
+            .send({ message: "Forbidden access: Requires Admin role" });
+        }
+        // --- End Authorization Check ---
+
+        // Remove internal/non-updatable fields if they were accidentally sent
+        const { _id, email, createdAt, ...fieldsToUpdate } = updatedDoc;
+
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(userId) },
+          {
+            $set: {
+              ...fieldsToUpdate,
+              updatedAt: new Date(), // Add an update timestamp
+            },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        res.send(result);
+      } catch (err) {
+        console.error("Error updating user:", err);
+        // Check for invalid ID format error
+        if (err.name === "BSONTypeError") {
+          return res.status(400).send({ message: "Invalid user ID format" });
+        }
+        res.status(500).send({ message: "Failed to update user information" });
+      }
+    });
+
     // ===== Tuition Routes =====
 
     app.get("/tuitions", verifyFBToken, async (req, res) => {
