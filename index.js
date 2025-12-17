@@ -47,18 +47,19 @@ const verifyFBToken = async (req, res, next) => {
   try {
     const idToken = authorizationHeader.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-    const userEmail = decoded.email;
 
-    req.decoded_email = userEmail;
+    req.decoded_email = decoded.email.toLowerCase();
 
+    const userEmail = decoded.email.toLowerCase();
     const user = await userCollection.findOne({ email: userEmail });
+
     if (!user) {
       return res
         .status(403)
         .send({ message: "Forbidden: User record missing." });
     }
-    req.user = user;
 
+    req.user = user;
     next();
   } catch (err) {
     console.error("Firebase token verification failed:", err);
@@ -186,14 +187,11 @@ async function run() {
         const userId = req.params.id;
         const updatedDoc = req.body;
 
-        // --- Authorization Check (Admin Only) ---
+        // Strict Admin check
         if (req.user.role !== "admin") {
-          return res
-            .status(403)
-            .send({ message: "Forbidden access: Requires Admin role" });
+          return res.status(403).send({ message: "Forbidden: Admin Only" });
         }
 
-        // Filter out non-editable fields
         const { _id, email, createdAt, ...fieldsToUpdate } = updatedDoc;
 
         const result = await userCollection.updateOne(
@@ -205,18 +203,9 @@ async function run() {
             },
           }
         );
-
-        if (result.matchedCount === 0) {
-          return res.status(404).send({ message: "User not found" });
-        }
-
         res.send(result);
       } catch (err) {
-        console.error("Error updating user:", err);
-        if (err.name === "BSONTypeError") {
-          return res.status(400).send({ message: "Invalid user ID format" });
-        }
-        res.status(500).send({ message: "Failed to update user information" });
+        res.status(500).send({ message: "Admin update failed" });
       }
     });
 
@@ -277,41 +266,80 @@ async function run() {
       }
     });
 
+    app.patch("/users/profile/update", verifyFBToken, async (req, res) => {
+      try {
+        const requester = req.user; // From verifyFBToken
+        const { displayName, email, photoURL } = req.body;
+
+        const filter = { _id: new ObjectId(requester._id) };
+        const updateDoc = {
+          $set: {
+            displayName,
+            email: email.toLowerCase(),
+            photoURL,
+            updatedAt: new Date(),
+          },
+        };
+
+        const result = await userCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to update profile" });
+      }
+    });
+
     // ===== Tuition Routes (Major Fixes Applied) =====
 
     // GET /tuitions: Fetch all (Admin) or by email (Student)
     app.get("/tuitions", verifyFBToken, async (req, res) => {
       try {
-        const page = parseInt(req.query.page) || 0;
-        const size = parseInt(req.query.size) || 6;
+        const { email, page, size } = req.query;
         const decodedEmail = req.decoded_email;
         const userRole = req.user?.role;
 
-        let query = { status: { $in: ["approved", "confirmed"] } };
-        if (userRole === "admin") query = {};
+        let query = {};
+
+        if (userRole === "admin") {
+          query = {};
+        } else if (email) {
+          if (email !== decodedEmail) {
+            return res.status(403).send({ message: "Forbidden access" });
+          }
+          query = { email: email };
+        } else {
+          query = {
+            status: { $in: ["approved", "applied", "confirmed"] },
+          };
+        }
+
+        const pageNum = parseInt(page) || 0;
+        const limitNum = parseInt(size) || 6;
+
         const totalCount = await tuitionCollection.countDocuments(query);
-        const tuitions = await tuitionCollection
+        const result = await tuitionCollection
           .find(query)
-          .skip(page * size)
-          .limit(size)
+          .skip(pageNum * limitNum)
+          .limit(limitNum)
           .sort({ createdAt: -1 })
           .toArray();
+
         const userApplications = await applicationCollection
           .find({ tutorEmail: decodedEmail })
           .project({ tuitionId: 1 })
           .toArray();
+
         const appliedIds = new Set(
-          userApplications.map((app) => app.tuitionId)
+          userApplications.map((app) => app.tuitionId.toString())
         );
 
-        const result = tuitions.map((t) => ({
+        const finalData = result.map((t) => ({
           ...t,
           hasApplied: appliedIds.has(t._id.toString()),
         }));
 
-        res.send({ result, totalCount });
+        res.send({ result: finalData, totalCount });
       } catch (err) {
-        res.status(500).send({ message: "Failed to fetch tuitions" });
+        res.status(500).send({ message: "Internal Server Error" });
       }
     });
 
