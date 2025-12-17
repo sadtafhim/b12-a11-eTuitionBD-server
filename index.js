@@ -1,4 +1,3 @@
-// backend/server.js
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
@@ -8,7 +7,6 @@ const admin = require("firebase-admin");
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Initialize Firebase Admin (Configuration left as is, assuming ENV variables are correct)
 admin.initializeApp({
   credential: admin.credential.cert({
     type: process.env.FIREBASE_TYPE,
@@ -22,11 +20,9 @@ admin.initializeApp({
   }),
 });
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// MongoDB Connection Setup
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.h1ahmwn.mongodb.net/eTuitionBD_db?retryWrites=true&w=majority`;
 const client = new MongoClient(uri, {
   serverApi: {
@@ -38,8 +34,8 @@ const client = new MongoClient(uri, {
 
 let userCollection;
 let tuitionCollection;
+let applicationCollection;
 
-// Firebase Token Verification Middleware (CRITICAL FIX)
 const verifyFBToken = async (req, res, next) => {
   const authorizationHeader = req.headers.authorization;
   if (!authorizationHeader || !authorizationHeader.startsWith("Bearer ")) {
@@ -53,18 +49,15 @@ const verifyFBToken = async (req, res, next) => {
     const decoded = await admin.auth().verifyIdToken(idToken);
     const userEmail = decoded.email;
 
-    // 1. Attach decoded email
     req.decoded_email = userEmail;
 
-    // 2. Fetch user from DB and attach full user object (including role) to req.user
-    // THIS FIXES THE "Cannot read property 'role' of undefined" 500 ERROR
     const user = await userCollection.findOne({ email: userEmail });
     if (!user) {
       return res
         .status(403)
         .send({ message: "Forbidden: User record missing." });
     }
-    req.user = user; // Now routes can safely access req.user.role
+    req.user = user;
 
     next();
   } catch (err) {
@@ -83,8 +76,9 @@ async function run() {
     const db = client.db("eTuitionBD_db");
     tuitionCollection = db.collection("tuitions");
     userCollection = db.collection("users");
+    applicationCollection = db.collection("applications");
 
-    // ===== User Routes (Mostly untouched, minor refactor) =====
+    // ===== User Routes =====
 
     app.post("/users", async (req, res) => {
       try {
@@ -135,9 +129,9 @@ async function run() {
           .toArray();
 
         if (email) {
-          res.send(users[0] || {}); // Send single user object
+          res.send(users[0] || {});
         } else {
-          res.send(users); // Send array of all users
+          res.send(users);
         }
       } catch (err) {
         console.error("Error fetching user(s):", err);
@@ -288,33 +282,35 @@ async function run() {
     // GET /tuitions: Fetch all (Admin) or by email (Student)
     app.get("/tuitions", verifyFBToken, async (req, res) => {
       try {
-        const { email } = req.query;
-        const userRole = req.user.role; // Safe to use now
-        let query = {};
+        const page = parseInt(req.query.page) || 0;
+        const size = parseInt(req.query.size) || 6;
+        const decodedEmail = req.decoded_email;
+        const userRole = req.user?.role;
 
-        if (email) {
-          // User is fetching their own tuitions (requires email match)
-          if (email !== req.decoded_email) {
-            return res.status(403).send({ message: "Forbidden access" });
-          }
-          query = { email };
-        } else if (userRole === "admin") {
-          // Admin is fetching all tuitions (no filter)
-          query = {};
-        } else {
-          // Public/Tutor view: Only allow approved/confirmed posts
-          query = { status: { $in: ["approved", "confirmed"] } };
-          // Optionally, you might want a separate, non-verified route for public viewing.
-        }
-
+        let query = { status: { $in: ["approved", "confirmed"] } };
+        if (userRole === "admin") query = {};
+        const totalCount = await tuitionCollection.countDocuments(query);
         const tuitions = await tuitionCollection
           .find(query)
+          .skip(page * size)
+          .limit(size)
           .sort({ createdAt: -1 })
           .toArray();
+        const userApplications = await applicationCollection
+          .find({ tutorEmail: decodedEmail })
+          .project({ tuitionId: 1 })
+          .toArray();
+        const appliedIds = new Set(
+          userApplications.map((app) => app.tuitionId)
+        );
 
-        res.send(tuitions);
+        const result = tuitions.map((t) => ({
+          ...t,
+          hasApplied: appliedIds.has(t._id.toString()),
+        }));
+
+        res.send({ result, totalCount });
       } catch (err) {
-        console.error("Error fetching tuitions:", err);
         res.status(500).send({ message: "Failed to fetch tuitions" });
       }
     });
@@ -467,6 +463,41 @@ async function run() {
       } catch (err) {
         console.error("Error deleting tuition:", err);
         res.status(500).send({ message: "Failed to delete tuition" });
+      }
+    });
+
+    // ===== Application Routes =====
+
+    app.post("/applications", verifyFBToken, async (req, res) => {
+      try {
+        const application = req.body;
+        application.tutorEmail = req.decoded_email;
+
+        const result = await applicationCollection.insertOne(application);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Server error" });
+      }
+    });
+    // GET /application/:id -> Fetch applications for a tutor by email
+    app.get("/application/:id", verifyFBToken, async (req, res) => {
+      try {
+        const tutorEmailFromParams = req.params.id;
+        const decodedEmail = req.decoded_email;
+        if (tutorEmailFromParams !== decodedEmail) {
+          return res.status(403).send({ message: "Forbidden Access" });
+        }
+
+        const query = { tutorEmail: tutorEmailFromParams };
+        const result = await applicationCollection
+          .find(query)
+          .sort({ appliedAt: -1 })
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        console.error("Error fetching applications:", error);
+        res.status(500).send({ message: "Internal Server Error" });
       }
     });
   } catch (err) {
