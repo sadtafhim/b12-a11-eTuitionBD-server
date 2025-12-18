@@ -566,9 +566,7 @@ async function run() {
     // ===== Payment Routes =====
     app.post("/payments", verifyFBToken, async (req, res) => {
       const paymentInfo = req.body;
-
       try {
-
         const paymentResult = await paymentCollection.insertOne({
           ...paymentInfo,
           date: new Date(),
@@ -618,6 +616,21 @@ async function run() {
         res.send({ clientSecret: paymentIntent.client_secret });
       } catch (error) {
         res.status(500).send({ message: error.message });
+      }
+    });
+    app.get("/payments/history", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded_email;
+        const query = { studentEmail: email };
+
+        const result = await paymentCollection
+          .find(query)
+          .sort({ date: -1 }) // Newest payments first
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch payment history" });
       }
     });
   } catch (err) {
