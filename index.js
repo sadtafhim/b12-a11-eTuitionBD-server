@@ -7,6 +7,8 @@ const admin = require("firebase-admin");
 const app = express();
 const port = process.env.PORT || 3000;
 
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+
 admin.initializeApp({
   credential: admin.credential.cert({
     type: process.env.FIREBASE_TYPE,
@@ -35,6 +37,7 @@ const client = new MongoClient(uri, {
 let userCollection;
 let tuitionCollection;
 let applicationCollection;
+let paymentCollection;
 
 const verifyFBToken = async (req, res, next) => {
   const authorizationHeader = req.headers.authorization;
@@ -78,6 +81,7 @@ async function run() {
     tuitionCollection = db.collection("tuitions");
     userCollection = db.collection("users");
     applicationCollection = db.collection("applications");
+    paymentCollection = db.collection("payments");
 
     // ===== User Routes =====
 
@@ -268,7 +272,7 @@ async function run() {
 
     app.patch("/users/profile/update", verifyFBToken, async (req, res) => {
       try {
-        const requester = req.user; // From verifyFBToken
+        const requester = req.user;
         const { displayName, email, photoURL } = req.body;
 
         const filter = { _id: new ObjectId(requester._id) };
@@ -526,6 +530,94 @@ async function run() {
       } catch (error) {
         console.error("Error fetching applications:", error);
         res.status(500).send({ message: "Internal Server Error" });
+      }
+    });
+    app.patch("/applications/reject/:id", verifyFBToken, async (req, res) => {
+      const appId = req.params.id;
+      const studentEmail = req.decoded_email;
+
+      try {
+        const query = { _id: new ObjectId(appId), studentEmail: studentEmail };
+        const result = await applicationCollection.updateOne(query, {
+          $set: { status: "rejected" },
+        });
+
+        if (result.modifiedCount === 0) {
+          return res
+            .status(404)
+            .send({ message: "Application not found or unauthorized" });
+        }
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Error rejecting application" });
+      }
+    });
+    app.get(
+      "/tuition-applications/:tuitionId",
+      verifyFBToken,
+      async (req, res) => {
+        const { tuitionId } = req.params;
+        const query = { tuitionId: tuitionId };
+        const result = await applicationCollection.find(query).toArray();
+        res.send(result);
+      }
+    );
+
+    // ===== Payment Routes =====
+    app.post("/payments", verifyFBToken, async (req, res) => {
+      const paymentInfo = req.body;
+
+      try {
+
+        const paymentResult = await paymentCollection.insertOne({
+          ...paymentInfo,
+          date: new Date(),
+          paymentStatus: "paid",
+        });
+
+        await applicationCollection.updateOne(
+          { _id: new ObjectId(paymentInfo.applicationId) },
+          { $set: { status: "accepted" } }
+        );
+
+        await applicationCollection.updateMany(
+          {
+            tuitionId: paymentInfo.tuitionId,
+            _id: { $ne: new ObjectId(paymentInfo.applicationId) },
+          },
+          { $set: { status: "rejected" } }
+        );
+
+        await tuitionCollection.updateOne(
+          { _id: new ObjectId(paymentInfo.tuitionId) },
+          { $set: { status: "confirmed" } }
+        );
+
+        res.send({ success: true, paymentResult });
+      } catch (err) {
+        console.error("Hiring workflow error:", err);
+        res
+          .status(500)
+          .send({ message: "Failed to complete the hiring process" });
+      }
+    });
+
+    app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
+      const { salary } = req.body;
+      if (!salary)
+        return res.status(400).send({ message: "Salary is required" });
+
+      const amount = Math.round(parseFloat(salary) * 100); // Stripe needs cents
+
+      try {
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount,
+          currency: "usd",
+          payment_method_types: ["card"],
+        });
+        res.send({ clientSecret: paymentIntent.client_secret });
+      } catch (error) {
+        res.status(500).send({ message: error.message });
       }
     });
   } catch (err) {
