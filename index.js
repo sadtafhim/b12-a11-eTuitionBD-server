@@ -459,6 +459,23 @@ async function run() {
       }
     });
 
+    // GET /tutor-ongoing-tuitions -> Fetch only "accepted" tuitions for the logged-in tutor
+    app.get("/tutor-ongoing-tuitions", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded_email;
+        const query = { tutorEmail: email, status: "accepted" };
+
+        const result = await applicationCollection
+          .find(query)
+          .sort({ acceptedAt: -1 })
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch ongoing tuitions" });
+      }
+    });
+
     // DELETE /tuitions/:id: Delete tuition (Creator or Admin)
     app.delete("/tuitions/:id", verifyFBToken, async (req, res) => {
       const tuitionId = req.params.id;
