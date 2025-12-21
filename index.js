@@ -515,6 +515,19 @@ async function run() {
       }
     });
 
+    app.get("/latest-tuitions", async (req, res) => {
+      try {
+        const result = await tuitionCollection
+          .find()
+          .sort({ createdAt: -1 }) // Sort by newest first
+          .limit(6) // Limit to 6 for the homepage
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch latest tuitions" });
+      }
+    });
+
     // ===== Application Routes =====
 
     app.post("/applications", verifyFBToken, async (req, res) => {
@@ -635,19 +648,58 @@ async function run() {
         res.status(500).send({ message: error.message });
       }
     });
-    app.get("/payments/history", verifyFBToken, async (req, res) => {
+    app.get("/tutor-revenue", verifyFBToken, async (req, res) => {
       try {
-        const email = req.decoded_email;
-        const query = { studentEmail: email };
+        const email = req.decoded_email || req.decoded?.email; // Use the check we discussed
+        const query = { tutorEmail: email };
 
-        const result = await paymentCollection
+        const transactions = await paymentCollection
           .find(query)
-          .sort({ date: -1 }) // Newest payments first
+          .sort({ date: -1 })
           .toArray();
 
-        res.send(result);
+        const totalEarnings = transactions.reduce(
+          (sum, payment) => sum + parseFloat(payment.amount),
+          0
+        );
+
+        res.send({
+          transactions,
+          totalEarnings,
+        });
       } catch (error) {
-        res.status(500).send({ message: "Failed to fetch payment history" });
+        console.error("Revenue Route Error:", error);
+        res.status(500).send({ message: "Internal Server Error" });
+      }
+    });
+    app.get("/admin-stats", verifyFBToken, async (req, res) => {
+      try {
+        const payments = await paymentCollection.find().toArray();
+
+        const totalRevenue = payments.reduce(
+          (sum, p) => sum + parseFloat(p.amount || 0),
+          0
+        );
+        const totalTransactions = payments.length;
+
+        const monthlyData = payments.reduce((acc, p) => {
+          const month = new Date(p.date).toLocaleString("default", {
+            month: "short",
+          });
+          acc[month] = (acc[month] || 0) + parseFloat(p.amount || 0);
+          return acc;
+        }, {});
+
+        res.send({
+          totalRevenue,
+          totalTransactions,
+          allPayments: payments.sort(
+            (a, b) => new Date(b.date) - new Date(a.date)
+          ),
+          monthlyData,
+        });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch admin stats" });
       }
     });
   } catch (err) {
