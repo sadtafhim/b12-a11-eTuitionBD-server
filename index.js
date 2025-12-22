@@ -88,20 +88,37 @@ async function run() {
     app.post("/users", async (req, res) => {
       try {
         const user = req.body;
-        user.role = user.role || "student";
-        user.createdAt = new Date();
-        const email = user.email;
-        const userExists = await userCollection.findOne({ email });
-        if (userExists) {
-          return res.send({ message: "user exists" });
+
+        if (!user.email) {
+          return res.status(400).send({ message: "Email is required" });
         }
 
-        const result = await userCollection.insertOne(user);
-        console.log("User registered:", user.email);
-        res.send({ insertedId: result.insertedId });
+        const email = user.email.toLowerCase();
+
+        const userExists = await userCollection.findOne({ email });
+
+        if (userExists) {
+          return res.send({ message: "User already exists", insertedId: null });
+        }
+
+        const newUser = {
+          displayName: user.displayName,
+          email: email,
+          photoURL: user.photoURL,
+          role: user.role || "student",
+          phone: user.phone || "Not Provided",
+          status: user.role === "tutor" ? "pending" : "active",
+          createdAt: new Date(),
+        };
+
+        const result = await userCollection.insertOne(newUser);
+        console.log("New User DB Entry Created:", email);
+        res.status(201).send({ insertedId: result.insertedId });
       } catch (err) {
-        console.error("Error creating user:", err);
-        res.status(500).send({ message: "Failed to create user" });
+        console.error("Critical DB Error during registration:", err);
+        res
+          .status(500)
+          .send({ message: "Internal Server Error during DB insertion" });
       }
     });
 
@@ -185,7 +202,6 @@ async function run() {
       }
     });
 
-    // PATCH /users/:id: Update user info/role (Admin only)
     app.patch("/users/:id", verifyFBToken, async (req, res) => {
       try {
         const userId = req.params.id;
@@ -213,7 +229,6 @@ async function run() {
       }
     });
 
-    // DELETE /users/:id: Delete user (Admin only, includes Firebase delete)
     app.delete("/users/:id", verifyFBToken, async (req, res) => {
       try {
         const userId = req.params.id;
@@ -223,8 +238,6 @@ async function run() {
             .status(403)
             .send({ message: "Forbidden access: Requires Admin role" });
         }
-
-        // ... (rest of the delete logic is good and remains) ...
 
         const userToDelete = await userCollection.findOne({
           _id: new ObjectId(userId),
@@ -291,10 +304,20 @@ async function run() {
         res.status(500).send({ message: "Failed to update profile" });
       }
     });
+    app.get("/latest-tutors", async (req, res) => {
+      try {
+        const query = { role: "tutor" };
+        const result = await userCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .limit(6)
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch tutors" });
+      }
+    });
 
-    // ===== Tuition Routes (Major Fixes Applied) =====
-
-    // GET /tuitions: Fetch all (Admin) or by email (Student)
     app.get("/tuitions", verifyFBToken, async (req, res) => {
       try {
         const { email, page, size } = req.query;
@@ -312,7 +335,7 @@ async function run() {
           query = { email: email };
         } else {
           query = {
-            status: { $in: ["approved", "applied", "confirmed"] },
+            status: { $in: ["approved", "applied"] },
           };
         }
 
@@ -347,7 +370,6 @@ async function run() {
       }
     });
 
-    // GET /tuitions/:id: Fetch single tuition (with access control)
     app.get("/tuitions/:id", verifyFBToken, async (req, res) => {
       const tuitionId = req.params.id;
       const userRole = req.user.role;
@@ -366,8 +388,7 @@ async function run() {
           return res.status(404).send({ message: "Tuition not found" });
         }
 
-        // --- Access Control Logic ---
-        const isCreator = tuition.email === userEmail; // Assuming email is stored as creator identifier
+        const isCreator = tuition.email === userEmail;
         const isApprovedOrConfirmed = ["approved", "confirmed"].includes(
           tuition.status
         );
@@ -386,14 +407,12 @@ async function run() {
       }
     });
 
-    // POST /tuitions: Create new tuition
     app.post("/tuitions", verifyFBToken, async (req, res) => {
       try {
         const tuition = req.body;
-        // Add required fields upon creation
         tuition.createdAt = new Date();
-        tuition.status = "pending"; // New posts start as pending
-        tuition.email = req.decoded_email; // Enforce creator's email
+        tuition.status = "pending";
+        tuition.email = req.decoded_email;
 
         const result = await tuitionCollection.insertOne(tuition);
         res.send({ insertedId: result.insertedId });
@@ -403,7 +422,6 @@ async function run() {
       }
     });
 
-    // PATCH /tuitions/:id: Update tuition (Admin status change or Student edit)
     app.patch("/tuitions/:id", verifyFBToken, async (req, res) => {
       const tuitionId = req.params.id;
       const { status, ...updatedDoc } = req.body;
@@ -423,7 +441,6 @@ async function run() {
           updatedAt: new Date().toISOString(),
         };
 
-        // --- Authorization and Status Logic ---
         if (userRole === "admin") {
           const validAdminStatuses = ["approved", "rejected"];
           if (validAdminStatuses.includes(status)) {
@@ -433,12 +450,8 @@ async function run() {
               .status(400)
               .send({ message: "Admin provided an invalid status." });
           }
-          // If admin is updating other fields, they are just updated without changing status unless specified.
         } else if (existingTuition.email === userEmail) {
-          // Student/Creator is editing the post content
-          // The post must go back to pending for re-approval
           updateFields.status = "pending";
-          // Ensure the creator cannot overwrite the 'email' or 'createdAt' fields
           delete updateFields.email;
           delete updateFields.createdAt;
         } else {
@@ -459,7 +472,6 @@ async function run() {
       }
     });
 
-    // GET /tutor-ongoing-tuitions -> Fetch only "accepted" tuitions for the logged-in tutor
     app.get("/tutor-ongoing-tuitions", verifyFBToken, async (req, res) => {
       try {
         const email = req.decoded_email;
@@ -476,7 +488,6 @@ async function run() {
       }
     });
 
-    // DELETE /tuitions/:id: Delete tuition (Creator or Admin)
     app.delete("/tuitions/:id", verifyFBToken, async (req, res) => {
       const tuitionId = req.params.id;
       const userRole = req.user.role;
@@ -491,7 +502,6 @@ async function run() {
           return res.status(404).send({ message: "Tuition not found" });
         }
 
-        // --- Authorization Check ---
         if (existingTuition.email !== userEmail && userRole !== "admin") {
           return res.status(403).send({
             message: "Forbidden: You are not authorized to delete this post.",
@@ -519,16 +529,14 @@ async function run() {
       try {
         const result = await tuitionCollection
           .find()
-          .sort({ createdAt: -1 }) // Sort by newest first
-          .limit(6) // Limit to 6 for the homepage
+          .sort({ createdAt: -1 })
+          .limit(6)
           .toArray();
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Failed to fetch latest tuitions" });
       }
     });
-
-    // ===== Application Routes =====
 
     app.post("/applications", verifyFBToken, async (req, res) => {
       try {
@@ -541,7 +549,6 @@ async function run() {
         res.status(500).send({ message: "Server error" });
       }
     });
-    // GET /application/:id -> Fetch applications for a tutor by email
     app.get("/application/:id", verifyFBToken, async (req, res) => {
       try {
         const tutorEmailFromParams = req.params.id;
@@ -593,7 +600,6 @@ async function run() {
       }
     );
 
-    // ===== Payment Routes =====
     app.post("/payments", verifyFBToken, async (req, res) => {
       const paymentInfo = req.body;
       try {
@@ -702,6 +708,20 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch admin stats" });
       }
     });
+    app.get("/payments/history", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded_email || req.decoded?.email;
+        const query = { studentEmail: email };
+        const result = await paymentCollection
+          .find(query)
+          .sort({ date: -1 })
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch payment history" });
+      }
+    });
   } catch (err) {
     console.error("MongoDB connection failed:", err);
   }
@@ -709,10 +729,8 @@ async function run() {
 
 run().catch(console.error);
 
-// Health check route
 app.get("/", (req, res) => {
   res.send("eTuitionBD Server is Running!");
 });
 
-// Start server
 app.listen(port, () => console.log(`Server running on port ${port}`));
